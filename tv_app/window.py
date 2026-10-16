@@ -12,6 +12,7 @@ from gi.repository import Gdk, GLib, Gtk
 
 from .channel_store import Channel, ChannelStore
 from .logging_setup import get_logger, log_path
+from .persist import try_store_write
 from .player import MpvPlayer
 from .settings import AppSettings
 from .ui.channel_list import ChannelListPane
@@ -243,9 +244,16 @@ class MainWindow(Gtk.ApplicationWindow):
             if values is None:
                 continue
             name, url = values
-            channel = self.store.add(name, url)
-            self._reload_list(select_id=channel.id)
-            self._play_channel(channel)
+            channel, err = try_store_write(lambda: self.store.add(name, url))
+            if err is not None:
+                log.error("Failed to save new channel", exc_info=err)
+                self._show_error(
+                    f"Could not save channel: {err}\nDetails: {log_path()}"
+                )
+                break
+            if channel is not None:
+                self._reload_list(select_id=channel.id)
+                self._play_channel(channel)
             break
         dialog.destroy()
 
@@ -257,16 +265,27 @@ class MainWindow(Gtk.ApplicationWindow):
         if not selected:
             return
         last_id = None
-        try:
+
+        def _add_all() -> Optional[str]:
+            nonlocal last_id
             for channel in selected:
                 last_id = self.store.add(channel.display_name, channel.url).id
-        except OSError as exc:
-            log.exception("Failed while importing %s channel(s)", len(selected))
-            self._show_error(f"Could not save imported channels: {exc}\nDetails: {log_path()}")
+            return last_id
+
+        result, err = try_store_write(_add_all)
+        if err is not None:
+            log.error(
+                "Failed while importing %s channel(s)",
+                len(selected),
+                exc_info=err,
+            )
+            self._show_error(
+                f"Could not save imported channels: {err}\nDetails: {log_path()}"
+            )
             self._reload_list(select_id=last_id)
             return
         log.info("Imported %s HDHomeRun channel(s)", len(selected))
-        self._reload_list(select_id=last_id)
+        self._reload_list(select_id=result)
 
     def _on_edit(self) -> None:
         channel = self._selected_channel()
@@ -283,7 +302,16 @@ class MainWindow(Gtk.ApplicationWindow):
             name, url = values
             # Capture before update(); ChannelStore mutates the same object.
             old_url = channel.url
-            updated = self.store.update(channel.id, name, url)
+            channel_id = channel.id
+            updated, err = try_store_write(
+                lambda: self.store.update(channel_id, name, url)
+            )
+            if err is not None:
+                log.error("Failed to save channel edits", exc_info=err)
+                self._show_error(
+                    f"Could not save channel: {err}\nDetails: {log_path()}"
+                )
+                break
             if updated is not None:
                 self._reload_list(select_id=updated.id)
                 if self._current and self._current.id == updated.id:
@@ -302,7 +330,17 @@ class MainWindow(Gtk.ApplicationWindow):
         channel = self._selected_channel()
         if channel is None:
             return
-        updated = self.store.set_favorite(channel.id, not channel.favorite)
+        channel_id = channel.id
+        favorite = not channel.favorite
+        updated, err = try_store_write(
+            lambda: self.store.set_favorite(channel_id, favorite)
+        )
+        if err is not None:
+            log.error("Failed to save favorite state", exc_info=err)
+            self._show_error(
+                f"Could not save favorites: {err}\nDetails: {log_path()}"
+            )
+            return
         if updated is not None:
             self._reload_list(select_id=updated.id)
 
@@ -312,7 +350,14 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         was_playing = self._current is not None and self._current.id == channel.id
         index = self.store.index_of(channel.id)
-        self.store.remove(channel.id)
+        channel_id = channel.id
+        _removed, err = try_store_write(lambda: self.store.remove(channel_id))
+        if err is not None:
+            log.error("Failed to remove channel", exc_info=err)
+            self._show_error(
+                f"Could not remove channel: {err}\nDetails: {log_path()}"
+            )
+            return
         if was_playing:
             self._stop_playback()
         remaining = self.store.list()

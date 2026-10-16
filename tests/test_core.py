@@ -5,11 +5,20 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tv_app.channel_store import ChannelStore
-from tv_app.hdhomerun import HdhrError, _parse_lineup, normalize_device_url
+from tv_app.hdhomerun import (
+    HdhrError,
+    _parse_lineup,
+    normalize_device_url,
+    resolve_lineup_url,
+    validate_fetch_url,
+)
 from tv_app.logging_setup import setup_logging
+from tv_app.persist import try_store_write
 from tv_app.settings import AppSettings
+from tv_app.ui.import_dialog import apply_if_open
 
 
 def setUpModule() -> None:
@@ -33,6 +42,74 @@ class NormalizeTests(unittest.TestCase):
     def test_rejects_blank(self) -> None:
         with self.assertRaises(HdhrError):
             normalize_device_url("")
+
+
+class ValidateFetchUrlTests(unittest.TestCase):
+    def test_allows_http_https(self) -> None:
+        self.assertEqual(
+            validate_fetch_url("http://192.168.1.27/lineup.json"),
+            "http://192.168.1.27/lineup.json",
+        )
+        self.assertEqual(
+            validate_fetch_url("https://hdhomerun.local/lineup.json"),
+            "https://hdhomerun.local/lineup.json",
+        )
+
+    def test_rejects_non_http_schemes(self) -> None:
+        for bad in (
+            "file:///etc/passwd",
+            "ftp://192.168.1.27/lineup.json",
+            "gopher://example/x",
+            "",
+            "not-a-url",
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(HdhrError):
+                    validate_fetch_url(bad)
+
+    def test_hostname_allowlist(self) -> None:
+        ok = validate_fetch_url(
+            "http://192.168.1.27:80/lineup.json",
+            allowed_hostname="192.168.1.27",
+        )
+        self.assertEqual(ok, "http://192.168.1.27:80/lineup.json")
+        with self.assertRaises(HdhrError):
+            validate_fetch_url(
+                "http://evil.example/lineup.json",
+                allowed_hostname="192.168.1.27",
+            )
+
+
+class ResolveLineupUrlTests(unittest.TestCase):
+    def test_ignores_untrusted_lineup_url_and_falls_back(self) -> None:
+        discover = {
+            "FriendlyName": "HDHR",
+            "LineupURL": "file:///tmp/evil.json",
+        }
+        with mock.patch(
+            "tv_app.hdhomerun._http_get_json",
+            return_value=discover,
+        ):
+            url = resolve_lineup_url("http://192.168.1.27")
+        self.assertEqual(url, "http://192.168.1.27/lineup.json")
+
+    def test_ignores_cross_host_lineup_url(self) -> None:
+        discover = {"LineupURL": "http://attacker.example/lineup.json"}
+        with mock.patch(
+            "tv_app.hdhomerun._http_get_json",
+            return_value=discover,
+        ):
+            url = resolve_lineup_url("http://192.168.1.27")
+        self.assertEqual(url, "http://192.168.1.27/lineup.json")
+
+    def test_accepts_same_host_lineup_url(self) -> None:
+        discover = {"LineupURL": "http://192.168.1.27/lineup.json"}
+        with mock.patch(
+            "tv_app.hdhomerun._http_get_json",
+            return_value=discover,
+        ):
+            url = resolve_lineup_url("http://192.168.1.27")
+        self.assertEqual(url, "http://192.168.1.27/lineup.json")
 
 
 class LineupTests(unittest.TestCase):
@@ -61,6 +138,37 @@ class LineupTests(unittest.TestCase):
         with self.assertRaises(HdhrError) as ctx:
             _parse_lineup({"ScanInProgress": 1, "Channels": []})
         self.assertIn("scanning", str(ctx.exception).lower())
+
+
+class ImportDialogGuardTests(unittest.TestCase):
+    def test_apply_if_open_runs_when_alive(self) -> None:
+        calls: list[str] = []
+        result = apply_if_open(False, lambda value: calls.append(value) or value, "ok")
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls, ["ok"])
+
+    def test_apply_if_open_skips_when_closed(self) -> None:
+        calls: list[str] = []
+        result = apply_if_open(True, lambda value: calls.append(value) or value, "late")
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+
+
+class PersistTests(unittest.TestCase):
+    def test_try_store_write_success(self) -> None:
+        value, err = try_store_write(lambda: 42)
+        self.assertEqual(value, 42)
+        self.assertIsNone(err)
+
+    def test_try_store_write_captures_oserror(self) -> None:
+        def boom() -> int:
+            raise OSError("disk full")
+
+        value, err = try_store_write(boom)
+        self.assertIsNone(value)
+        self.assertIsInstance(err, OSError)
+        assert err is not None
+        self.assertEqual(str(err), "disk full")
 
 
 class StoreTests(unittest.TestCase):
@@ -130,6 +238,33 @@ class StoreTests(unittest.TestCase):
 
             store.set_favorite(b.id, False)
             self.assertEqual([ch.name for ch in store.list()], ["A", "B", "C"])
+
+    def test_add_surfaces_oserror_via_try_store_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "channels.json"
+            store = ChannelStore(path)
+            with mock.patch.object(store, "save", side_effect=OSError("read-only")):
+                channel, err = try_store_write(
+                    lambda: store.add("NBC", "http://192.168.1.27:5004/auto/v2.1")
+                )
+            self.assertIsNone(channel)
+            self.assertIsInstance(err, OSError)
+            # Failed write must not leave a half-applied in-memory channel.
+            self.assertEqual(store.list(), [])
+
+    def test_update_rolls_back_on_save_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "channels.json"
+            store = ChannelStore(path)
+            channel = store.add("NBC", "http://example/a")
+            with mock.patch.object(store, "save", side_effect=OSError("read-only")):
+                with self.assertRaises(OSError):
+                    store.update(channel.id, "CBS", "http://example/b")
+            found = store.get(channel.id)
+            self.assertIsNotNone(found)
+            assert found is not None
+            self.assertEqual(found.name, "NBC")
+            self.assertEqual(found.url, "http://example/a")
 
 
 class SettingsTests(unittest.TestCase):

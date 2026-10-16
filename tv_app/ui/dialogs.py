@@ -103,6 +103,24 @@ def confirm_remove(parent: Gtk.Window, channel_name: str) -> bool:
     return response == Gtk.ResponseType.OK
 
 
+def _polish_about_dialog(dialog: Gtk.AboutDialog) -> None:
+    """Hide the default logo and disable text-selection cursors on labels."""
+    dialog.set_logo(None)
+    dialog.set_logo_icon_name("")
+
+    def walk(widget: Gtk.Widget) -> None:
+        if isinstance(widget, Gtk.Image):
+            widget.hide()
+            widget.set_no_show_all(True)
+        elif isinstance(widget, Gtk.Label):
+            widget.set_selectable(False)
+        if isinstance(widget, Gtk.Container):
+            for child in widget.get_children():
+                walk(child)
+
+    walk(dialog)
+
+
 def show_about(parent: Gtk.Window) -> None:
     dialog = Gtk.AboutDialog(
         transient_for=parent,
@@ -115,5 +133,6 @@ def show_about(parent: Gtk.Window) -> None:
         license_type=Gtk.License.MIT_X11,
         copyright="Licensed under the MIT License",
     )
+    _polish_about_dialog(dialog)
     dialog.run()
     dialog.destroy()

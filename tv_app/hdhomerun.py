@@ -89,13 +89,47 @@ def _raise_connectivity(message: str, url: str, cause: BaseException) -> NoRetur
     raise HdhrError(message, connectivity=True, url=url) from cause
 
 
+def validate_fetch_url(
+    url: str,
+    *,
+    allowed_hostname: Optional[str] = None,
+) -> str:
+    """Ensure a URL is safe to fetch (http/https only; optional host match).
+
+    Returns the normalized URL string. Raises HdhrError when rejected.
+    """
+    text = (url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HdhrError(
+            "Refusing to fetch a non-http(s) URL from the HDHomeRun response.",
+            url=text or None,
+        )
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise HdhrError(
+            "Refusing to fetch a URL without a hostname.",
+            url=text,
+        )
+    if allowed_hostname is not None:
+        expected = allowed_hostname.lower()
+        if hostname != expected:
+            raise HdhrError(
+                "HDHomeRun returned a lineup URL on a different host; ignoring it.",
+                url=text,
+            )
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path or "", "", "", ""))
+
+
 def _http_get_json(url: str, timeout: float) -> object:
+    # Defense in depth: never follow file:// or other unexpected schemes.
+    safe_url = validate_fetch_url(url)
     request = urllib.request.Request(
-        url,
+        safe_url,
         headers={"Accept": "application/json", "User-Agent": "tv-app/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         # HTTPError is also a URLError subclass; handle status codes first.
@@ -244,6 +278,7 @@ def _parse_lineup(payload: object) -> List[HdhrChannel]:
 def resolve_lineup_url(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
     """Resolve lineup.json URL via discover.json, with a direct fallback."""
     base = normalize_device_url(base_url)
+    device_host = urlparse(base).hostname
     discover_url = f"{base}/discover.json"
     try:
         data = _http_get_json(discover_url, timeout=timeout)
@@ -261,8 +296,18 @@ def resolve_lineup_url(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
     if isinstance(data, dict):
         lineup = str(data.get("LineupURL") or data.get("lineupURL") or "").strip()
         if lineup:
-            log.info("Resolved lineup URL via discover.json: %s", lineup)
-            return lineup
+            try:
+                safe = validate_fetch_url(lineup, allowed_hostname=device_host)
+            except HdhrError as exc:
+                log.warning(
+                    "Ignoring untrusted LineupURL %r from %s (%s); using local fallback",
+                    lineup,
+                    base,
+                    exc,
+                )
+                return f"{base}/lineup.json"
+            log.info("Resolved lineup URL via discover.json: %s", safe)
+            return safe
         log.warning("discover.json missing LineupURL for %s", base)
     else:
         log.warning("discover.json was not an object for %s", base)
@@ -282,9 +327,11 @@ def fetch_lineup(
         parsed = urlparse(text)
         path = (parsed.path or "").rstrip("/")
         if path.endswith("/lineup.json"):
-            if not parsed.scheme or not parsed.netloc:
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 raise HdhrError("Enter a valid http:// URL or IP address.")
-            lineup_url = urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+            lineup_url = validate_fetch_url(
+                urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+            )
         else:
             lineup_url = resolve_lineup_url(user_url, timeout=timeout)
 

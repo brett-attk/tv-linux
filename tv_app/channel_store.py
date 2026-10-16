@@ -99,32 +99,50 @@ class ChannelStore:
     def add(self, name: str, url: str) -> Channel:
         channel = Channel(name=name.strip(), url=url.strip())
         self.channels.append(channel)
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            self.channels.pop()
+            raise
         return channel
 
     def update(self, channel_id: str, name: str, url: str) -> Optional[Channel]:
         channel = self.get(channel_id)
         if channel is None:
             return None
+        previous = (channel.name, channel.url)
         channel.name = name.strip()
         channel.url = url.strip()
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            channel.name, channel.url = previous
+            raise
         return channel
 
     def set_favorite(self, channel_id: str, favorite: bool) -> Optional[Channel]:
         channel = self.get(channel_id)
         if channel is None:
             return None
+        previous = channel.favorite
         channel.favorite = favorite
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            channel.favorite = previous
+            raise
         return channel
 
     def remove(self, channel_id: str) -> bool:
-        before = len(self.channels)
+        previous = list(self.channels)
         self.channels = [c for c in self.channels if c.id != channel_id]
-        if len(self.channels) == before:
+        if len(self.channels) == len(previous):
             return False
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            self.channels = previous
+            raise
         return True
 
     def neighbor(self, channel_id: str, delta: int) -> Optional[Channel]:

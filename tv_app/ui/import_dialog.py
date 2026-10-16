@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Iterable, List, Optional, Set
+from typing import Callable, Iterable, List, Optional, Set, TypeVar
 
 import gi
 
@@ -14,6 +14,18 @@ from ..hdhomerun import HdhrChannel, HdhrError, fetch_lineup
 from ..logging_setup import get_logger, log_path
 
 log = get_logger(__name__)
+
+T = TypeVar("T")
+
+
+def apply_if_open(closed: bool, callback: Callable[..., T], *args) -> Optional[T]:
+    """Run ``callback`` only when the dialog is still open.
+
+    Used so background fetch completions are ignored after destroy.
+    """
+    if closed:
+        return None
+    return callback(*args)
 
 
 class HdhrImportDialog(Gtk.Dialog):
@@ -42,6 +54,8 @@ class HdhrImportDialog(Gtk.Dialog):
         self._channels: List[HdhrChannel] = []
         self._checks: List[Gtk.CheckButton] = []
         self._fetching = False
+        self._closed = False
+        self.connect("destroy", self._on_destroyed)
 
         content = self.get_content_area()
         content.set_spacing(8)
@@ -94,8 +108,11 @@ class HdhrImportDialog(Gtk.Dialog):
         self.show_all()
         self._update_ok_sensitivity()
 
+    def _on_destroyed(self, *_args) -> None:
+        self._closed = True
+
     def _on_fetch_clicked(self, *_args) -> None:
-        if self._fetching:
+        if self._fetching or self._closed:
             return
         url = self.url_entry.get_text().strip()
         if not url:
@@ -118,18 +135,26 @@ class HdhrImportDialog(Gtk.Dialog):
                     exc,
                     log_path(),
                 )
-                GLib.idle_add(self._on_fetch_failed, str(exc))
+                GLib.idle_add(self._idle_fetch_failed, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001 - surface unexpected fetch errors in UI
                 log.exception("Unexpected HDHomeRun import failure for %r", url)
                 GLib.idle_add(
-                    self._on_fetch_failed,
+                    self._idle_fetch_failed,
                     f"Unexpected error: {exc}. See {log_path()}.",
                 )
                 return
-            GLib.idle_add(self._on_fetch_ok, channels)
+            GLib.idle_add(self._idle_fetch_ok, channels)
 
         threading.Thread(target=worker, daemon=True, name="hdhr-fetch").start()
+
+    def _idle_fetch_failed(self, message: str) -> bool:
+        apply_if_open(self._closed, self._on_fetch_failed, message)
+        return False
+
+    def _idle_fetch_ok(self, channels: List[HdhrChannel]) -> bool:
+        apply_if_open(self._closed, self._on_fetch_ok, channels)
+        return False
 
     def _on_fetch_failed(self, message: str) -> bool:
         self._fetching = False
