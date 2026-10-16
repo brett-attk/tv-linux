@@ -15,41 +15,51 @@ Licensed under the [MIT License](LICENSE).
 - Settings (e.g. OSC on/off) stored in `~/.config/tv-app/settings.json`
 - Errors logged to `~/.local/state/tv-app/error.log` (rotated)
 
-## Setup
+## Install (Debian/Ubuntu)
 
-### System packages (Debian/Ubuntu)
+Do these steps once, from a terminal, in the project directory.
+
+### 1. Get the code
 
 ```bash
+git clone https://github.com/brett-attk/tv-linux.git
+cd tv-linux
+```
+
+### 2. Install system packages
+
+```bash
+sudo apt update
 sudo apt install python3 python3-venv python3-gi gir1.2-gtk-3.0 libmpv2 libmpv-dev
 ```
 
-| Package | Why |
-|---------|-----|
-| `python3-gi` / `gir1.2-gtk-3.0` | GTK 3 bindings for the UI |
-| `libmpv2` | libmpv shared library used for playback |
-| `libmpv-dev` | Provides the `libmpv.so` symlink that `python-mpv` loads |
-| `python3-venv` | Creates the project virtualenv |
+These provide Python, GTK 3, and libmpv (needed for the UI and video).
 
-### Python environment
+### 3. Create the Python environment
 
-`--system-site-packages` is required so the venv can import distro `python3-gi` / GTK:
+`--system-site-packages` is required so the app can use the system GTK packages from step 2:
 
 ```bash
 python3 -m venv --system-site-packages .venv
+.venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` installs `python-mpv` (ctypes wrapper around libmpv). It does **not** replace the system `libmpv2` package.
+This installs `python-mpv` into `.venv`. It does not replace the system `libmpv2` package.
 
-## Run
-
-`run.sh` forces `GDK_BACKEND=x11` so mpv can embed via an X11 window id (needed on Wayland via XWayland):
+### 4. Run the app
 
 ```bash
 ./run.sh
 ```
 
-Or:
+`run.sh` starts the app with X11 embedding enabled (needed for video on Wayland).
+
+On first launch the channel list is empty. Add channels with **Settings → Add Channel…** or **Settings → Import from HDHomeRun…**. Your list is saved under `~/.config/tv-app/` on this machine only.
+
+**Later launches:** from the project directory, just run `./run.sh` again (no reinstall needed).
+
+**Alternative launch** (same as `./run.sh`):
 
 ```bash
 GDK_BACKEND=x11 .venv/bin/python -m tv_app
@@ -105,15 +115,19 @@ tests/              unit tests (no display required)
 
 ## Troubleshooting
 
-HDHomeRun import and other failures show a short message in the UI and write details (timeouts, DNS, connection refused, HTTP errors, stack traces) to:
+| Problem | What to check |
+|---------|----------------|
+| `ModuleNotFoundError: gi` or GTK errors | Re-run step 2, and recreate the venv with `--system-site-packages` (step 3) |
+| `No module named mpv` / libmpv load errors | Install `libmpv2` and `libmpv-dev` (step 2), then `pip install -r requirements.txt` (step 3) |
+| Black video / no picture | Launch with `./run.sh` (forces X11). Plain Wayland without X11 embedding will not work |
+| Import / network errors | Details are written to `~/.local/state/tv-app/error.log` |
 
 ```bash
-~/.local/state/tv-app/error.log
+# View the error log
+less ~/.local/state/tv-app/error.log
 ```
 
-Override locations with `XDG_CONFIG_HOME` (channels/settings) or `XDG_STATE_HOME` (error log) if needed.
-
-If video fails to embed, confirm you launched with X11 (`./run.sh` or `GDK_BACKEND=x11`) and that `libmpv2` / `libmpv-dev` are installed.
+Optional: override storage locations with `XDG_CONFIG_HOME` (channels/settings) or `XDG_STATE_HOME` (error log).
 
 ## Channel format
 
