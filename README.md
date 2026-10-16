@@ -11,9 +11,33 @@ Licensed under the [MIT License](LICENSE).
 - Settings menu: add a channel or import from an HDHomeRun device lineup
 - Right pane: embedded mpv video
 - Channel Prev / Next, volume, mute, fullscreen
-- Channels / favorites stored only on the local machine in `~/.config/tv-app/channels.json` (created empty on first run; not shipped in the repo)
-- Settings (e.g. OSC on/off) stored in `~/.config/tv-app/settings.json`
-- Errors logged to `~/.local/state/tv-app/error.log` (rotated)
+- Local-only persistence under XDG paths (see [Where data is stored](#where-data-is-stored))
+
+## Where data is stored
+
+Nothing from your channel list is shipped in the git repo. On first launch the app creates the config directory and empty files as needed.
+
+| What | File | Notes |
+|------|------|--------|
+| **Channel list + favorites** | `~/.config/tv-app/channels.json` | Updated whenever you add, edit, remove, import, or favorite a channel |
+| **App settings** (e.g. OSC on/off) | `~/.config/tv-app/settings.json` | Preferences that survive restarts |
+| **Error log** | `~/.local/state/tv-app/error.log` | Rotating log for import/network and other failures |
+
+Paths follow the XDG Base Directory spec:
+
+- Config (channels + settings): `$XDG_CONFIG_HOME/tv-app/` — defaults to `~/.config/tv-app/`
+- State (error log): `$XDG_STATE_HOME/tv-app/` — defaults to `~/.local/state/tv-app/`
+
+```bash
+# Inspect your channel list
+less ~/.config/tv-app/channels.json
+
+# Inspect settings
+less ~/.config/tv-app/settings.json
+
+# Inspect the error log
+less ~/.local/state/tv-app/error.log
+```
 
 ## Install (Debian/Ubuntu)
 
@@ -55,7 +79,7 @@ This installs `python-mpv` into `.venv`. It does not replace the system `libmpv2
 
 `run.sh` starts the app with X11 embedding enabled (needed for video on Wayland).
 
-On first launch the channel list is empty. Add channels with **Settings → Add Channel…** or **Settings → Import from HDHomeRun…**. Your list is saved under `~/.config/tv-app/` on this machine only.
+On first launch the channel list is empty. Add channels with **Settings → Add Channel…** or **Settings → Import from HDHomeRun…**. Your list is saved only on this machine in `~/.config/tv-app/channels.json` (see [Where data is stored](#where-data-is-stored)).
 
 **Later launches:** from the project directory, just run `./run.sh` again (no reinstall needed).
 
@@ -128,11 +152,11 @@ tests/              unit tests (no display required)
 less ~/.local/state/tv-app/error.log
 ```
 
-Optional: override storage locations with `XDG_CONFIG_HOME` (channels/settings) or `XDG_STATE_HOME` (error log).
+To relocate storage, set `XDG_CONFIG_HOME` and/or `XDG_STATE_HOME` before launching (see [Where data is stored](#where-data-is-stored)).
 
 ## Channel format
 
-Each channel has a **friendly name** (shown in the list), a stream **URL**, and an optional **favorite** flag:
+`~/.config/tv-app/channels.json` holds each channel’s **friendly name**, stream **URL**, and optional **favorite** flag:
 
 ```json
 {
