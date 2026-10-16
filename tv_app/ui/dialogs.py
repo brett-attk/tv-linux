@@ -1,4 +1,4 @@
-"""Add / Edit channel dialogs."""
+"""Add / Edit channel dialogs and About."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
+from .. import __version__
 from ..channel_store import Channel
+
+_GITHUB_URL = "https://github.com/brett-attk/tv-linux"
 
 
 def _valid_url(url: str) -> bool:
@@ -98,3 +101,19 @@ def confirm_remove(parent: Gtk.Window, channel_name: str) -> bool:
     response = dialog.run()
     dialog.destroy()
     return response == Gtk.ResponseType.OK
+
+
+def show_about(parent: Gtk.Window) -> None:
+    dialog = Gtk.AboutDialog(
+        transient_for=parent,
+        modal=True,
+        program_name="TV",
+        version=__version__,
+        comments="GTK television front-end with embedded mpv playback.",
+        website=_GITHUB_URL,
+        website_label="GitHub repository",
+        license_type=Gtk.License.MIT_X11,
+        copyright="Licensed under the MIT License",
+    )
+    dialog.run()
+    dialog.destroy()

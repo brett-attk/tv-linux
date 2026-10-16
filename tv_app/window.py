@@ -16,7 +16,7 @@ from .player import MpvPlayer
 from .settings import AppSettings
 from .ui.channel_list import ChannelListPane
 from .ui.controls import PlaybackBar
-from .ui.dialogs import ChannelDialog, confirm_remove
+from .ui.dialogs import ChannelDialog, confirm_remove, show_about
 from .ui.import_dialog import HdhrImportDialog
 
 log = get_logger(__name__)
@@ -108,6 +108,12 @@ class MainWindow(Gtk.ApplicationWindow):
         import_item = Gtk.MenuItem(label="Import from HDHomeRun…")
         import_item.connect("activate", lambda *_: self._on_import())
         settings_menu.append(import_item)
+
+        settings_menu.append(Gtk.SeparatorMenuItem())
+
+        about_item = Gtk.MenuItem(label="About")
+        about_item.connect("activate", lambda *_: self._on_about())
+        settings_menu.append(about_item)
 
         menu_bar.append(settings_root)
         return menu_bar
@@ -223,6 +229,9 @@ class MainWindow(Gtk.ApplicationWindow):
         neighbor = self.store.neighbor(current_id, delta)
         if neighbor is not None:
             self._play_channel(neighbor)
+
+    def _on_about(self) -> None:
+        show_about(self)
 
     def _on_add(self) -> None:
         dialog = ChannelDialog(self, "Add Channel")

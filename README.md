@@ -72,6 +72,7 @@ GDK_BACKEND=x11 .venv/bin/python -m tv_app
 | Play channel | Play icon on selected row | — |
 | Stop channel | Stop icon on selected playing row | — |
 | Add channel | Settings → Add Channel… | — |
+| About | Settings → About | — |
 | Favorite channel | Right-click channel → Favorite this channel / Remove from favorites | — |
 | Edit / Remove channel | Right-click channel → Edit / Remove | — |
 | Import HDHomeRun | Settings → Import from HDHomeRun… → enter device URL → Fetch → select channels | — |
