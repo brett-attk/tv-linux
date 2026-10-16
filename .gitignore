@@ -7,3 +7,10 @@ __pycache__/
 dist/
 build/
 *.json.tmp
+
+# User data lives under XDG (~/.config/tv-app, ~/.local/state/tv-app).
+# Ignore copies dropped in the repo by mistake.
+channels.json
+settings.json
+error.log
+error.log.*

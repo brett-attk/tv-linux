@@ -8,7 +8,13 @@ from pathlib import Path
 
 from tv_app.channel_store import ChannelStore
 from tv_app.hdhomerun import HdhrError, _parse_lineup, normalize_device_url
+from tv_app.logging_setup import setup_logging
 from tv_app.settings import AppSettings
+
+
+def setUpModule() -> None:
+    # Keep test logs out of the user's real state directory.
+    setup_logging(Path(tempfile.mkdtemp()) / "error.log")
 
 
 class NormalizeTests(unittest.TestCase):
@@ -51,20 +57,37 @@ class LineupTests(unittest.TestCase):
         self.assertEqual([c.display_name for c in channels], ["2.1  NBC", "4.1  FOX  (DRM)"])
         self.assertTrue(channels[1].has_drm)
 
+    def test_scan_in_progress(self) -> None:
+        with self.assertRaises(HdhrError) as ctx:
+            _parse_lineup({"ScanInProgress": 1, "Channels": []})
+        self.assertIn("scanning", str(ctx.exception).lower())
+
 
 class StoreTests(unittest.TestCase):
+    def test_first_start_creates_empty_channels_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tv-app" / "channels.json"
+            self.assertFalse(path.exists())
+            store = ChannelStore(path)
+            self.assertTrue(path.exists())
+            self.assertEqual(store.list(), [])
+            self.assertEqual(
+                path.read_text(encoding="utf-8").strip(),
+                '{\n  "channels": []\n}',
+            )
+
     def test_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "channels.json"
             store = ChannelStore(path)
-            for existing in list(store.list()):
-                store.remove(existing.id)
+            self.assertEqual(store.list(), [])
             added = store.add("NBC", "http://192.168.1.27:5004/auto/v2.1")
             reloaded = ChannelStore(path)
             found = reloaded.get(added.id)
             self.assertIsNotNone(found)
             assert found is not None
             self.assertEqual(found.name, "NBC")
+            self.assertFalse(found.favorite)
             neighbor = reloaded.neighbor(added.id, 1)
             self.assertIsNotNone(neighbor)
             assert neighbor is not None
@@ -72,8 +95,52 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(reloaded.remove(added.id))
             self.assertEqual(reloaded.list(), [])
 
+    def test_favorite_persists_and_sorts_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "channels.json"
+            store = ChannelStore(path)
+            a = store.add("A", "http://example/a")
+            b = store.add("B", "http://example/b")
+            c = store.add("C", "http://example/c")
+            self.assertEqual([ch.name for ch in store.list()], ["A", "B", "C"])
+
+            updated = store.set_favorite(b.id, True)
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertTrue(updated.favorite)
+            self.assertEqual([ch.name for ch in store.list()], ["B", "A", "C"])
+
+            # Neighbor follows display order (favorites first).
+            for current_id, expected_id in (
+                (b.id, a.id),
+                (a.id, c.id),
+                (c.id, b.id),
+            ):
+                neighbor = store.neighbor(current_id, 1)
+                self.assertIsNotNone(neighbor)
+                assert neighbor is not None
+                self.assertEqual(neighbor.id, expected_id)
+
+            reloaded = ChannelStore(path)
+            found = reloaded.get(b.id)
+            self.assertIsNotNone(found)
+            assert found is not None
+            self.assertTrue(found.favorite)
+            self.assertEqual([ch.name for ch in reloaded.list()], ["B", "A", "C"])
+
+            store.set_favorite(b.id, False)
+            self.assertEqual([ch.name for ch in store.list()], ["A", "B", "C"])
+
 
 class SettingsTests(unittest.TestCase):
+    def test_first_start_creates_default_settings_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tv-app" / "settings.json"
+            self.assertFalse(path.exists())
+            settings = AppSettings.load(path)
+            self.assertTrue(path.exists())
+            self.assertTrue(settings.osc_enabled)
+
     def test_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"

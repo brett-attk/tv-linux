@@ -13,6 +13,10 @@ from typing import Callable, Optional
 
 import mpv
 
+from .logging_setup import get_logger
+
+log = get_logger(__name__)
+
 
 class MpvPlayer:
     def __init__(self, osc_enabled: bool = True) -> None:
@@ -49,7 +53,7 @@ class MpvPlayer:
                 job()
             except Exception:
                 # Never let a failed mpv call kill the worker thread.
-                pass
+                log.exception("mpv worker job failed")
             finally:
                 self._jobs.task_done()
 
@@ -130,11 +134,14 @@ class MpvPlayer:
             else:
                 player.command_async("stop")
         except Exception:
-            # Fallback to synchronous API if async is unavailable.
-            if url:
-                player.play(url)
-            else:
-                player.command("stop")
+            log.exception("mpv async media command failed; trying sync fallback")
+            try:
+                if url:
+                    player.play(url)
+                else:
+                    player.command("stop")
+            except Exception:
+                log.exception("mpv sync media command failed for %r", url)
 
     def set_volume(self, volume: int) -> None:
         self._volume = max(0, min(100, int(volume)))
@@ -179,7 +186,7 @@ class MpvPlayer:
             try:
                 player["osc"] = self._osc_enabled
             except Exception:
-                pass
+                log.exception("Failed to set mpv osc=%s", self._osc_enabled)
         # Force OSC to hide immediately when disabled (visibility may linger otherwise).
         try:
             if self._osc_enabled:
@@ -187,7 +194,7 @@ class MpvPlayer:
             else:
                 player.command("script-message", "osc-visibility", "never", "no-osd")
         except Exception:
-            pass
+            log.debug("mpv osc-visibility script-message unsupported", exc_info=True)
 
     @property
     def osc_enabled(self) -> bool:

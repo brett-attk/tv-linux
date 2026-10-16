@@ -1,4 +1,4 @@
-"""Channel list pane: hover-to-select rows and per-row play/stop."""
+"""Channel list pane: click-to-select rows and per-row play/stop."""
 
 from __future__ import annotations
 
@@ -19,31 +19,36 @@ ActionHandler = Callable[[], None]
 
 _PLAY_ICON = "media-playback-start-symbolic"
 _STOP_ICON = "media-playback-stop-symbolic"
+_FAVORITE_ICON = "emblem-favorite-symbolic"
 _BTN_SIZE = 28
+_HEART_SIZE = 16
 
 
 @dataclass
 class _Row:
     channel_id: str
+    favorite: bool
     play_btn: Gtk.Button
     play_image: Gtk.Image
 
 
 class ChannelListPane(Gtk.Box):
-    """Left-hand channel list with Add / Edit / Remove / Import."""
+    """Left-hand channel list; Edit / Remove / Favorite via right-click menu."""
 
     def __init__(
         self,
         on_play: PlayHandler,
         on_stop: StopHandler,
-        on_add: ActionHandler,
         on_edit: ActionHandler,
         on_remove: ActionHandler,
-        on_import: ActionHandler,
+        on_toggle_favorite: ActionHandler,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._on_play = on_play
         self._on_stop = on_stop
+        self._on_edit = on_edit
+        self._on_remove = on_remove
+        self._on_toggle_favorite = on_toggle_favorite
         self._playing_id: Optional[str] = None
         self._rows: dict[Gtk.ListBoxRow, _Row] = {}
 
@@ -70,32 +75,14 @@ class ChannelListPane(Gtk.Box):
         self.list_box = Gtk.ListBox()
         self.list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.list_box.connect("row-selected", self._on_row_selected)
+        # Capture phase so right-click works even over child widgets (e.g. play).
+        gesture = Gtk.GestureMultiPress.new(self.list_box)
+        gesture.set_button(Gdk.BUTTON_SECONDARY)
+        gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        gesture.connect("pressed", self._on_secondary_pressed)
+        self._context_gesture = gesture
         scrolled.add(self.list_box)
-
-        viewport = self.list_box.get_parent()
-        if viewport is not None:
-            viewport.add_events(
-                Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK
-            )
-            viewport.connect("motion-notify-event", self._on_list_motion)
-            viewport.connect("enter-notify-event", self._on_list_motion)
         self.pack_start(scrolled, True, True, 0)
-
-        self.edit_btn = Gtk.Button(label="Edit")
-        self.remove_btn = Gtk.Button(label="Remove")
-        add_btn = Gtk.Button(label="Add")
-        import_btn = Gtk.Button(label="Import")
-        add_btn.connect("clicked", lambda *_: on_add())
-        self.edit_btn.connect("clicked", lambda *_: on_edit())
-        self.remove_btn.connect("clicked", lambda *_: on_remove())
-        import_btn.connect("clicked", lambda *_: on_import())
-
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        for button in (add_btn, self.edit_btn, self.remove_btn, import_btn):
-            button.set_hexpand(True)
-            btn_row.pack_start(button, True, True, 0)
-        self.pack_start(btn_row, False, False, 0)
-        self._update_edit_buttons()
 
     def reload(
         self,
@@ -121,7 +108,6 @@ class ChannelListPane(Gtk.Box):
         self.list_box.show_all()
         if selected is not None:
             self.list_box.select_row(selected)
-        self._update_edit_buttons()
         self._update_play_buttons()
 
     def set_playing(self, channel_id: Optional[str]) -> None:
@@ -149,6 +135,12 @@ class ChannelListPane(Gtk.Box):
         box.set_margin_top(4)
         box.set_margin_bottom(4)
 
+        if channel.favorite:
+            heart = Gtk.Image.new_from_icon_name(_FAVORITE_ICON, Gtk.IconSize.MENU)
+            heart.set_pixel_size(_HEART_SIZE)
+            heart.set_valign(Gtk.Align.CENTER)
+            box.pack_start(heart, False, False, 0)
+
         label = Gtk.Label(label=channel.name, xalign=0)
         label.set_ellipsize(Pango.EllipsizeMode.END)
         label.set_hexpand(True)
@@ -173,20 +165,40 @@ class ChannelListPane(Gtk.Box):
         slot.pack_start(play_btn, True, True, 0)
         box.pack_end(slot, False, False, 0)
 
-        hover = Gtk.EventBox()
-        hover.set_visible_window(True)
-        hover.override_background_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(0, 0, 0, 0))
-        hover.add(box)
-        hover.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
-        hover.connect("enter-notify-event", self._on_hover, row)
-        hover.connect("motion-notify-event", self._on_hover, row)
-        play_btn.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
-        play_btn.connect("enter-notify-event", self._on_hover, row)
-        play_btn.connect("motion-notify-event", self._on_hover, row)
-        row.add(hover)
-
-        self._rows[row] = _Row(channel.id, play_btn, image)
+        row.add(box)
+        self._rows[row] = _Row(channel.id, channel.favorite, play_btn, image)
         return row
+
+    def _on_secondary_pressed(
+        self, _gesture: Gtk.GestureMultiPress, _n_press: int, _x: float, y: float
+    ) -> None:
+        row = self.list_box.get_row_at_y(int(y))
+        if row is None or row not in self._rows:
+            return
+        self.list_box.select_row(row)
+        self._popup_channel_menu()
+
+    def _popup_channel_menu(self) -> None:
+        menu = Gtk.Menu()
+        row = self.list_box.get_selected_row()
+        meta = self._rows.get(row) if row is not None else None
+        favorite = meta.favorite if meta is not None else False
+
+        fav_label = "Remove from favorites" if favorite else "Favorite this channel"
+        fav_item = Gtk.MenuItem(label=fav_label)
+        fav_item.connect("activate", lambda *_: self._on_toggle_favorite())
+        menu.append(fav_item)
+
+        edit_item = Gtk.MenuItem(label="Edit")
+        edit_item.connect("activate", lambda *_: self._on_edit())
+        menu.append(edit_item)
+
+        remove_item = Gtk.MenuItem(label="Remove")
+        remove_item.connect("activate", lambda *_: self._on_remove())
+        menu.append(remove_item)
+
+        menu.show_all()
+        menu.popup_at_pointer(None)
 
     def _on_play_clicked(self, _button: Gtk.Button, channel_id: str) -> None:
         if self._playing_id == channel_id:
@@ -194,29 +206,8 @@ class ChannelListPane(Gtk.Box):
         else:
             self._on_play(channel_id)
 
-    def _select_row(self, row: Optional[Gtk.ListBoxRow]) -> None:
-        if row is not None and self.list_box.get_selected_row() is not row:
-            self.list_box.select_row(row)
-
-    def _on_hover(self, _widget: Gtk.Widget, _event: Gdk.Event, row: Gtk.ListBoxRow) -> bool:
-        self._select_row(row)
-        return False
-
-    def _on_list_motion(self, viewport: Gtk.Widget, event: Gdk.Event) -> bool:
-        ok, _x, y = viewport.translate_coordinates(self.list_box, int(event.x), int(event.y))
-        if not ok:
-            y = int(event.y)
-        self._select_row(self.list_box.get_row_at_y(int(y)))
-        return False
-
     def _on_row_selected(self, _listbox: Gtk.ListBox, _row: Optional[Gtk.ListBoxRow]) -> None:
-        self._update_edit_buttons()
         self._update_play_buttons()
-
-    def _update_edit_buttons(self) -> None:
-        has = self.selected_id() is not None
-        self.edit_btn.set_sensitive(has)
-        self.remove_btn.set_sensitive(has)
 
     def _update_play_buttons(self) -> None:
         selected = self.list_box.get_selected_row()

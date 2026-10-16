@@ -11,6 +11,9 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, Pango
 
 from ..hdhomerun import HdhrChannel, HdhrError, fetch_lineup
+from ..logging_setup import get_logger, log_path
+
+log = get_logger(__name__)
 
 
 class HdhrImportDialog(Gtk.Dialog):
@@ -109,20 +112,30 @@ class HdhrImportDialog(Gtk.Dialog):
             try:
                 channels = fetch_lineup(url)
             except HdhrError as exc:
+                log.error(
+                    "HDHomeRun import failed for %r: %s (details in %s)",
+                    url,
+                    exc,
+                    log_path(),
+                )
                 GLib.idle_add(self._on_fetch_failed, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001 - surface unexpected fetch errors in UI
-                GLib.idle_add(self._on_fetch_failed, f"Unexpected error: {exc}")
+                log.exception("Unexpected HDHomeRun import failure for %r", url)
+                GLib.idle_add(
+                    self._on_fetch_failed,
+                    f"Unexpected error: {exc}. See {log_path()}.",
+                )
                 return
             GLib.idle_add(self._on_fetch_ok, channels)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="hdhr-fetch").start()
 
     def _on_fetch_failed(self, message: str) -> bool:
         self._fetching = False
         self.fetch_btn.set_sensitive(True)
         self.url_entry.set_sensitive(True)
-        self.status_label.set_text(message)
+        self.status_label.set_text(f"{message}\nDetails: {log_path()}")
         self.select_all_btn.set_sensitive(False)
         self.select_none_btn.set_sensitive(False)
         self._update_ok_sensitivity()

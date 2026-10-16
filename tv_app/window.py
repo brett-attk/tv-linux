@@ -11,12 +11,15 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
 from .channel_store import Channel, ChannelStore
+from .logging_setup import get_logger, log_path
 from .player import MpvPlayer
 from .settings import AppSettings
 from .ui.channel_list import ChannelListPane
 from .ui.controls import PlaybackBar
 from .ui.dialogs import ChannelDialog, confirm_remove
 from .ui.import_dialog import HdhrImportDialog
+
+log = get_logger(__name__)
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -42,16 +45,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self.show_all()
 
     def _build_ui(self) -> None:
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(outer)
+        self.menu_bar = self._build_menu_bar()
+        outer.pack_start(self.menu_bar, False, False, 0)
+
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        self.add(root)
+        outer.pack_start(root, True, True, 0)
 
         self.channels = ChannelListPane(
             on_play=self._on_play_requested,
             on_stop=self._stop_playback,
-            on_add=self._on_add,
             on_edit=self._on_edit,
             on_remove=self._on_remove,
-            on_import=self._on_import,
+            on_toggle_favorite=self._on_toggle_favorite,
         )
         root.pack_start(self.channels, False, False, 0)
 
@@ -87,29 +94,59 @@ class MainWindow(Gtk.ApplicationWindow):
         right.pack_start(self.controls, False, False, 0)
         root.pack_start(right, True, True, 0)
 
+    def _build_menu_bar(self) -> Gtk.MenuBar:
+        menu_bar = Gtk.MenuBar()
+
+        settings_menu = Gtk.Menu()
+        settings_root = Gtk.MenuItem(label="Settings")
+        settings_root.set_submenu(settings_menu)
+
+        add_item = Gtk.MenuItem(label="Add Channel…")
+        add_item.connect("activate", lambda *_: self._on_add())
+        settings_menu.append(add_item)
+
+        import_item = Gtk.MenuItem(label="Import from HDHomeRun…")
+        import_item.connect("activate", lambda *_: self._on_import())
+        settings_menu.append(import_item)
+
+        menu_bar.append(settings_root)
+        return menu_bar
+
     def _on_video_realize(self, widget: Gtk.EventBox) -> None:
         window = widget.get_window()
         if window is None:
+            log.error("Video area realized without a GDK window")
             return
         try:
             wid = window.get_xid()
         except Exception:
-            GLib.idle_add(self._show_error, "Video embedding requires X11 (run via ./run.sh).")
+            log.exception("Failed to read X11 window id for video embedding")
+            GLib.idle_add(
+                self._show_error,
+                "Video embedding requires X11 (run via ./run.sh).",
+            )
             return
         if not wid:
+            log.error("X11 window id was empty for video pane")
             GLib.idle_add(self._show_error, "Could not get X11 window id for video pane.")
             return
         try:
             self.player.attach(wid)
         except Exception as exc:
-            GLib.idle_add(self._show_error, f"Failed to embed mpv: {exc}")
+            log.exception("Failed to attach mpv to wid=%s", wid)
+            GLib.idle_add(
+                self._show_error,
+                f"Failed to embed mpv: {exc}\nDetails: {log_path()}",
+            )
             return
         self._player_ready = True
-        if self.store.list():
-            first = self.store.list()[0]
-            self.channels.select(first.id)
+        log.info("mpv attached to wid=%s", wid)
+        channels = self.store.list()
+        if channels:
+            self.channels.select(channels[0].id)
 
     def _show_error(self, message: str) -> bool:
+        log.error("Showing error dialog: %s", message)
         dialog = Gtk.MessageDialog(
             transient_for=self,
             modal=True,
@@ -176,12 +213,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._schedule_size_restore(size, delayed=False)
 
     def _change_channel(self, delta: int) -> None:
-        if not self.store.list():
+        channels = self.store.list()
+        if not channels:
             return
         current_id = self._current.id if self._current else None
         if current_id is None:
             selected = self._selected_channel()
-            current_id = selected.id if selected else self.store.list()[0].id
+            current_id = selected.id if selected else channels[0].id
         neighbor = self.store.neighbor(current_id, delta)
         if neighbor is not None:
             self._play_channel(neighbor)
@@ -210,8 +248,15 @@ class MainWindow(Gtk.ApplicationWindow):
         if not selected:
             return
         last_id = None
-        for channel in selected:
-            last_id = self.store.add(channel.display_name, channel.url).id
+        try:
+            for channel in selected:
+                last_id = self.store.add(channel.display_name, channel.url).id
+        except OSError as exc:
+            log.exception("Failed while importing %s channel(s)", len(selected))
+            self._show_error(f"Could not save imported channels: {exc}\nDetails: {log_path()}")
+            self._reload_list(select_id=last_id)
+            return
+        log.info("Imported %s HDHomeRun channel(s)", len(selected))
         self._reload_list(select_id=last_id)
 
     def _on_edit(self) -> None:
@@ -227,26 +272,46 @@ class MainWindow(Gtk.ApplicationWindow):
             if values is None:
                 continue
             name, url = values
+            # Capture before update(); ChannelStore mutates the same object.
+            old_url = channel.url
             updated = self.store.update(channel.id, name, url)
             if updated is not None:
                 self._reload_list(select_id=updated.id)
                 if self._current and self._current.id == updated.id:
-                    self._play_channel(updated)
+                    if updated.url != old_url:
+                        # URL change: reload on the mpv worker thread.
+                        self._play_channel(updated)
+                    else:
+                        # Name-only edit: refresh UI without interrupting playback.
+                        self._current = updated
+                        self.controls.set_now_playing(updated.name)
+                        self.channels.set_playing(updated.id)
             break
         dialog.destroy()
+
+    def _on_toggle_favorite(self) -> None:
+        channel = self._selected_channel()
+        if channel is None:
+            return
+        updated = self.store.set_favorite(channel.id, not channel.favorite)
+        if updated is not None:
+            self._reload_list(select_id=updated.id)
 
     def _on_remove(self) -> None:
         channel = self._selected_channel()
         if channel is None or not confirm_remove(self, channel.name):
             return
         was_playing = self._current is not None and self._current.id == channel.id
+        index = self.store.index_of(channel.id)
         self.store.remove(channel.id)
         if was_playing:
             self._stop_playback()
         remaining = self.store.list()
-        self._reload_list(select_id=remaining[0].id if remaining else None)
-        if was_playing and remaining:
-            self._play_channel(remaining[0])
+        select_id = None
+        if remaining and index >= 0:
+            # Prefer the channel that takes this slot; otherwise the previous one.
+            select_id = remaining[min(index, len(remaining) - 1)].id
+        self._reload_list(select_id=select_id)
 
     def _on_vol_up(self) -> None:
         self.controls.set_volume(self.player.volume_up(), self.player.muted)
@@ -266,21 +331,27 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_osc_toggled(self, enabled: bool) -> None:
         self.player.set_osc_enabled(enabled)
         self.settings.osc_enabled = enabled
-        self.settings.save()
+        try:
+            self.settings.save()
+        except OSError as exc:
+            log.exception("Failed to persist OSC setting")
+            self._show_error(f"Could not save settings: {exc}\nDetails: {log_path()}")
 
     def _on_fullscreen_clicked(self) -> None:
         self._set_ui_fullscreen(not self._ui_fullscreen)
 
+    def _set_chrome_visible(self, visible: bool) -> None:
+        for widget in (self.menu_bar, self.channels, self.controls):
+            widget.set_visible(visible)
+
     def _set_ui_fullscreen(self, enabled: bool) -> None:
         self._ui_fullscreen = enabled
         if enabled:
-            self.channels.hide()
-            self.controls.hide()
+            self._set_chrome_visible(False)
             self.fullscreen()
         else:
             self.unfullscreen()
-            self.channels.show()
-            self.controls.show()
+            self._set_chrome_visible(True)
         if self._player_ready:
             self.player.set_fullscreen(enabled)
 
@@ -297,8 +368,7 @@ class MainWindow(Gtk.ApplicationWindow):
             is_fs = bool(event.new_window_state & Gdk.WindowState.FULLSCREEN)
             if not is_fs and self._ui_fullscreen:
                 self._ui_fullscreen = False
-                self.channels.show()
-                self.controls.show()
+                self._set_chrome_visible(True)
                 if self._player_ready:
                     self.player.set_fullscreen(False)
         return False
